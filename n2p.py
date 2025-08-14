@@ -34,22 +34,40 @@ class N2PClient:
         self.session.mount("http://", HTTPAdapter(max_retries=retry))
 
     def _get_token(self, force=False):
-        if not force and self._token and time.time() < (self._exp - 30):
-            return self._token
-        data = {
-            "grant_type":"client_credentials",
-            "client_id": self.cfg.client_id,
-            "client_secret": self.cfg.client_secret
-        }
-        r = self.session.post(self.cfg.token_url, data=data, timeout=30)
-        r.raise_for_status()
-        j = r.json()
-        token = j.get("access_token")
-        if not token:
-            raise RuntimeError(f"Invalid token response: {j}")
-        self._token = token
-        self._exp = time.time() + int(j.get("expires_in", 3600))
+    if not force and self._token and time.time() < (self._exp - 30):
         return self._token
+
+    scope = os.getenv("N2P_SCOPE")  # opcional
+    data = {"grant_type": "client_credentials"}
+    if scope:
+        data["scope"] = scope
+
+    # Tentativa 1: client_id/secret no body
+    r = self.session.post(self.cfg.token_url, data={
+        **data,
+        "client_id": self.cfg.client_id,
+        "client_secret": self.cfg.client_secret,
+    }, timeout=30)
+
+    # Se 400/401, tenta com HTTP Basic (alguns ambientes exigem)
+    if r.status_code in (400, 401):
+        r = self.session.post(self.cfg.token_url, data=data,
+                              auth=(self.cfg.client_id, self.cfg.client_secret),
+                              timeout=30)
+
+    try:
+        r.raise_for_status()
+    except requests.HTTPError as e:
+        # loga o corpo p/ facilitar diagnóstico
+        raise RuntimeError(f"Token error ({r.status_code}): {r.text}") from e
+
+    j = r.json()
+    token = j.get("access_token")
+    if not token:
+        raise RuntimeError(f"Invalid token response: {j}")
+    self._token = token
+    self._exp = time.time() + int(j.get("expires_in", 3600))
+    return self._token
 
     def _headers(self, token):
         return {"Authorization": f"Bearer {token}", "Content-Type":"application/json"}
